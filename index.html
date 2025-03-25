@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3D Zahn-Visualisierung</title>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.172.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.172.0/examples/jsm/"
+      }
+    }
+  </script>
+  <style>
+    body {
+      margin: 0;
+      display: flex;
+      height: 100vh;
+    }
+    #sidebar {
+      width: 400px;
+      background: #333;
+      color: white;
+      padding: 10px;
+      position: relative;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+    }
+    #sidebar-content {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    #resize-bar {
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 10px;
+      height: 100%;
+      cursor: ew-resize;
+      background: #777;
+      z-index: 10;
+    }
+    #three-mount {
+      flex-grow: 1;
+      overflow: hidden;
+    }
+    .sidebar-section {
+      border: 1px solid #666;
+      padding: 8px;
+      margin-bottom: 10px;
+    }
+    .model-control {
+      border: 1px solid #555;
+      padding: 6px;
+      margin-top: 6px;
+    }
+    .small-input {
+      width: 60px;
+    }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <div id="sidebar-content">
+      <div class="sidebar-section">
+        <label>STL model via weblink:</label>
+        <input type="text" id="stl-url-input" placeholder="http://..." style="width:100%; margin-top:4px;" />
+        <button id="load-stl-url-button" style="margin-top:4px;">Load model</button>
+      </div>
+
+      <div class="sidebar-section">
+        <input type="file" id="file-input" accept=".stl" style="display:none" />
+        <button id="add-model-button">+ Add local STL model</button>
+      </div>
+
+      <div class="sidebar-section">
+        <label>Scaling for all models:</label>
+        <input type="range" id="global-scale-input" min="0.1" max="2" step="0.1" value="0.5" />
+        <br>
+        <label>Current scaling: <span id="current-scale">0.5</span></label>
+      </div>
+
+      <div class="sidebar-section" style="display: none;>
+        <label>FOV (Field of View):</label>
+        <input type="range" id="fov-input" min="1" max="180" step="1" value="20" />
+        <br>
+        <label>Aktuelles FOV: <span id="current-fov">20</span></label>
+      </div>
+
+      <div class="sidebar-section">
+        <label>Background color:</label>
+        <input type="color" id="bg-color-input" value="#ffffff" />
+      </div>
+
+      <div class="sidebar-section">
+        <label>Show grid:</label>
+        <input type="checkbox" id="grid-toggle" checked>
+      </div>
+
+      <div class="sidebar-section" id="camera-controls" style="display: none;>
+        <label>Kameraposition</label>
+        <br>
+        <label>X: </label><input type="number" id="camera-x" value="0" step="1">
+        <br>
+        <label>Y: </label><input type="number" id="camera-y" value="9" step="1">
+        <br>
+        <label>Z: </label><input type="number" id="camera-z" value="70" step="1">
+        <br>
+        <button id="update-camera-button">Kamera aktualisieren</button>
+      </div>
+
+      <div class="sidebar-section" id="model-controls"></div>
+    </div>
+    <div id="resize-bar"></div>
+  </div>
+  <div id="three-mount"></div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+
+    // Globales Array für Modelle – die Reihenfolge entspricht dem Arrayindex
+    let models = [];
+    let sidebarWidth = 400;
+    let globalScale = 0.5;
+    let fov = 20;
+
+    const loader = new STLLoader();
+    const mountRef = document.getElementById('three-mount');
+    const modelControls = document.getElementById('model-controls');
+    const fileInput = document.getElementById('file-input');
+    const globalScaleInput = document.getElementById('global-scale-input');
+    const fovInput = document.getElementById('fov-input');
+    const bgColorInput = document.getElementById('bg-color-input');
+    const gridToggle = document.getElementById('grid-toggle');
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(fov, window.innerWidth / window.innerHeight, 0.1, 1000);
+    // Standard-Kameraposition: x=0, y=9, z=70
+    camera.position.set(0, 9, 70);
+    camera.lookAt(0, 0, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth - sidebarWidth, window.innerHeight);
+    mountRef.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1.5);
+    scene.add(light);
+
+    const gridHelper = new THREE.GridHelper(50, 50);
+    scene.add(gridHelper);
+
+    const axesHelper = new THREE.AxesHelper(30);
+    scene.add(axesHelper);
+
+    // Hintergrundfarbe initial setzen
+    renderer.setClearColor(bgColorInput.value, 1);
+
+    function updateModelControls() {
+      modelControls.innerHTML = '';
+      models.forEach((model, index) => {
+        if (!model) return;
+        const modelDiv = document.createElement('div');
+        modelDiv.className = 'model-control';
+        modelDiv.innerHTML = `
+          <label>${model.name}</label><br>
+          <input type="color" value="#${model.material.color.getHexString()}" 
+                 onchange="window.updateColor(${index}, this.value)" />
+          <label>Transparency</label>
+          <input type="range" min="0.1" max="1" step="0.1" value="${model.opacity}"
+                 onchange="window.updateOpacity(${index}, this.value)" />
+          <br>
+          <label>Order</label>
+          <input type="number" class="small-input" value="${model.renderOrder}"
+                 onchange="window.updateRenderOrder(${index}, this.value)" />
+          <br>
+          <label>Model Show / Hide</label>
+          <input type="checkbox" ${model.visible ? 'checked' : ''} 
+                 onchange="window.toggleVisibility(${index}, this.checked)" />
+          <br>
+          <label>Wireframe</label>
+          <input type="checkbox" onchange="window.toggleWireframe(${index}, this.checked)" />
+        `;
+        modelControls.appendChild(modelDiv);
+      });
+    }
+
+    window.updateColor = function(index, value) {
+      models[index].material.color.set(value);
+    };
+
+    window.updateOpacity = function(index, value) {
+      models[index].material.opacity = parseFloat(value);
+      models[index].opacity = parseFloat(value);
+      models[index].material.transparent = true;
+      models[index].material.needsUpdate = true;
+    };
+
+    window.updateRenderOrder = function(index, value) {
+      models[index].mesh.renderOrder = parseInt(value);
+      models[index].renderOrder = parseInt(value);
+    };
+
+    window.toggleVisibility = function(index, checked) {
+      models[index].visible = checked;
+      models[index].mesh.visible = checked;
+    };
+
+    window.toggleWireframe = function(index, checked) {
+      models[index].material.wireframe = checked;
+      models[index].material.needsUpdate = true;
+    };
+
+    // loadModelFromURL erhält zusätzlich einen Index und prüft, ob ein Dateiname in den Optionen übergeben wurde
+    function loadModelFromURL(url, options = {}, index) {
+      return fetch(url)
+        .then(response => {
+          if (!response.ok) throw new Error('Netzwerkantwort war nicht ok');
+          return response.arrayBuffer();
+        })
+        .then(arrayBuffer => {
+          const geometry = loader.parse(arrayBuffer);
+          geometry.computeVertexNormals();
+          
+          const material = new THREE.MeshPhongMaterial({
+            color: options.color ? new THREE.Color(options.color) : Math.random() * 0xffffff,
+            transparent: true,
+            opacity: options.opacity || 1,
+            side: THREE.DoubleSide
+          });
+          
+          const model = new THREE.Mesh(geometry, material);
+          model.renderOrder = options.renderOrder || (index + 1);
+          model.scale.set(0.5, 0.5, 0.5);
+          model.visible = options.visible !== undefined ? options.visible : true;
+          scene.add(model);
+          
+          // Verwende den übergebenen Namen (bei lokalen Daten) oder extrahiere den Dateinamen aus der URL
+          const fileName = options.name || url.split('/').pop();
+          
+          models[index] = {
+            name: fileName,
+            mesh: model,
+            material: material,
+            opacity: options.opacity || 1,
+            renderOrder: options.renderOrder || (index + 1),
+            visible: options.visible !== undefined ? options.visible : true
+          };
+          updateModelControls();
+        })
+        .catch(error => {
+          console.error("Fehler beim Laden des STL Modells:", error);
+          models[index] = {
+            name: 'Fehler: ' + url.split('/').pop(),
+            mesh: null,
+            material: { color: { getHexString: () => '000000' } },
+            opacity: 0,
+            renderOrder: options.renderOrder || (index + 1),
+            visible: false
+          };
+          updateModelControls();
+          throw error;
+        });
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    globalScaleInput.addEventListener('input', (e) => {
+      globalScale = parseFloat(e.target.value);
+      models.forEach(model => {
+        if (model && model.mesh) {
+          model.mesh.scale.set(globalScale, globalScale, globalScale);
+        }
+      });
+      document.getElementById('current-scale').textContent = globalScale;
+    });
+
+    fovInput.addEventListener('input', (e) => {
+      fov = parseInt(e.target.value, 10);
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
+      document.getElementById('current-fov').textContent = fov;
+    });
+
+    // Hintergrundfarbe anpassen
+    bgColorInput.addEventListener('input', (e) => {
+      renderer.setClearColor(e.target.value, 1);
+    });
+
+    // Gitter ein- und ausblenden
+    gridToggle.addEventListener('change', (e) => {
+      gridHelper.visible = e.target.checked;
+    });
+
+    // Kamera-Steuerung
+    const cameraXInput = document.getElementById('camera-x');
+    const cameraYInput = document.getElementById('camera-y');
+    const cameraZInput = document.getElementById('camera-z');
+    const updateCameraButton = document.getElementById('update-camera-button');
+
+    updateCameraButton.addEventListener('click', () => {
+      const x = parseFloat(cameraXInput.value);
+      const y = parseFloat(cameraYInput.value);
+      const z = parseFloat(cameraZInput.value);
+      camera.position.set(x, y, z);
+      camera.lookAt(0, 0, 0);
+      controls.update();
+    });
+
+    document.getElementById('add-model-button').addEventListener('click', () => fileInput.click());
+    // Lokaler Upload: Dateiname wird aus dem File-Objekt übergeben
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files[0]) {
+        const file = e.target.files[0];
+        loadModelFromURL(URL.createObjectURL(file), { name: file.name }, models.length);
+      }
+    });
+
+    document.getElementById('load-stl-url-button').addEventListener('click', () => {
+      const url = document.getElementById('stl-url-input').value;
+      if (url) {
+        loadModelFromURL(url, {}, models.length);
+      }
+    });
+
+    const resizeBar = document.getElementById('resize-bar');
+    let isResizing = false;
+    let startX = 0;
+    let startWidth = sidebarWidth;
+
+    resizeBar.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      isResizing = true;
+      startX = e.clientX;
+      startWidth = sidebarWidth;
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isResizing) return;
+      e.preventDefault();
+      const newWidth = startWidth + (e.clientX - startX);
+      if (newWidth > 150 && newWidth < (window.innerWidth - 50)) {
+        sidebarWidth = newWidth;
+        document.getElementById('sidebar').style.width = `${sidebarWidth}px`;
+        renderer.setSize(window.innerWidth - sidebarWidth, window.innerHeight);
+        // Aktualisiere Kameraaspekt und ProjectionMatrix, damit die 3D-Anzeige proportional bleibt
+        camera.aspect = (window.innerWidth - sidebarWidth) / window.innerHeight;
+        camera.updateProjectionMatrix();
+      }
+    });
+
+    document.addEventListener('mouseup', () => {
+      isResizing = false;
+    });
+
+    // Initiale Größenanpassung, wenn alle Ressourcen geladen sind
+    window.onload = () => {
+      renderer.setSize(window.innerWidth - sidebarWidth, window.innerHeight);
+      camera.aspect = (window.innerWidth - sidebarWidth) / window.innerHeight;
+      camera.updateProjectionMatrix();
+    };
+
+    // Automatisches Laden der STL-Modelle mittels Promise.allSettled
+    const stlFiles = [
+      { url: 'https://raw.githubusercontent.com/DigitaleAesthetischeZahnmedizin/CAD_CAM_ENG/refs/heads/main/STL/01_Pre_OP_Natural_Teeth_UpperJaw.stl', options: { visible: true, opacity: 0.5, renderOrder: 2, color: '#00E0FF' } },
+      { url: 'https://raw.githubusercontent.com/DigitaleAesthetischeZahnmedizin/CAD_CAM_ENG/refs/heads/main/STL/03_PostOP_Preparation_UpperJaw.stl', options: { visible: true, opacity: 1.0, renderOrder: 1, color: '#ff0000' } },
+      { url: 'https://raw.githubusercontent.com/DigitaleAesthetischeZahnmedizin/CAD_CAM_ENG/refs/heads/main/STL/04_Result_IntraoralScan_UpperJaw.stl', options: { visible: true, opacity: 0.3, renderOrder: 3, color: '#CDFF00' } },
+      { url: 'https://raw.githubusercontent.com/DigitaleAesthetischeZahnmedizin/CAD_CAM_ENG/refs/heads/main/STL/04_Reference_spheres_0.5mm_diameter.stl', options: { visible: true, opacity: 1.0, renderOrder: 1, color: '#ff0000' } },     
+      { url: 'https://raw.githubusercontent.com/DigitaleAesthetischeZahnmedizin/CAD_CAM_ENG/refs/heads/main/STL/05_Result_LaboratoryScan_UpperJaw.stl', options: { visible: false, opacity: 0.3, renderOrder: 3, color: '#8F00FF' } },
+      { url: 'https://raw.githubusercontent.com/DigitaleAesthetischeZahnmedizin/CAD_CAM_ENG/refs/heads/main/STL/02_PreOP_Mockup_UpperJaw.stl', options: { visible: false, opacity: 0.3, renderOrder: 2, color: '#FF00F8' } },
+      { url: 'https://raw.githubusercontent.com/DigitaleAesthetischeZahnmedizin/CAD_CAM_ENG/refs/heads/main/STL/02_PreOP_LowerJaw.stl', options: { visible: false, opacity: 0.3, renderOrder: 3, color: '#FF00F8' } },
+      { url: 'https://raw.githubusercontent.com/DigitaleAesthetischeZahnmedizin/CAD_CAM_ENG/refs/heads/main/STL/01_Pre_OP_Natural_Teeth_LowerJaw.stl', options: { visible: false, opacity: 0.3, renderOrder: 3, color: '#00E0FF' } },
+      { url: 'https://raw.githubusercontent.com/DigitaleAesthetischeZahnmedizin/CAD_CAM_ENG/refs/heads/main/STL/04_Result_IntraoralScan_LowerJaw.stl', options: { visible: false, opacity: 0.3, renderOrder: 3, color: '#CDFF00' } },
+      { url: 'https://raw.githubusercontent.com/DigitaleAesthetischeZahnmedizin/CAD_CAM_ENG/refs/heads/main/STL/05_Result_LaboratoryScan_LowerJaw.stl', options: { visible: false, opacity: 0.3, renderOrder: 3, color: '#8F00FF' } }
+    ];
+
+    const promises = stlFiles.map((file, index) => loadModelFromURL(file.url, file.options, index));
+
+    Promise.allSettled(promises)
+      .then(results => {
+        const resultsDiv = document.createElement('div');
+        resultsDiv.style.backgroundColor = '#222';
+        resultsDiv.style.color = '#fff';
+        resultsDiv.style.padding = '10px';
+        resultsDiv.innerHTML = '<h3>Model loading results:</h3>';
+        results.forEach((result, index) => {
+          if (result.status === 'fulfilled') {
+            resultsDiv.innerHTML += `<p>Model ${index+1}: Successfully loaded.</p>`;
+          } else {
+            resultsDiv.innerHTML += `<p>Model ${index+1}: Error during loading.</p>`;
+          }
+        });
+        document.getElementById('sidebar-content').appendChild(resultsDiv);
+      });
+  </script>
+</body>
+</html>
+
